@@ -1,7 +1,7 @@
 /*
  * peripherals.c
  *
- * Пины и таймеры соответствуют распиновке STM32F411CEUx:
+ * Pins and timers match the STM32F411CEUx pinout:
  *   LEFT_AIN_1  = PC13   LEFT_AIN_2  = PC14
  *   RIGHT_AIN1  = PC15   RIGHT_AIN2  = PA3
  *   STBY        = PA4
@@ -10,11 +10,11 @@
 
 #include "peripherals.h"
 
-extern TIM_HandleTypeDef htim1;   /* PWM моторов */
-extern TIM_HandleTypeDef htim4;   /* серво */
-extern TIM_HandleTypeDef htim5;   /* серво */
+extern TIM_HandleTypeDef htim1;   /* motor PWM */
+extern TIM_HandleTypeDef htim4;   /* servos */
+extern TIM_HandleTypeDef htim5;   /* servos */
 
-/* ---------- Управление драйвером TB6612FNG ---------- */
+/* ---------- TB6612FNG driver control ---------- */
 static void motor_stby(uint8_t enable)
 {
     HAL_GPIO_WritePin(STBY_GPIO_Port, STBY_Pin, enable ? GPIO_PIN_SET : GPIO_PIN_RESET);
@@ -53,9 +53,9 @@ void Periph_MotorSet(uint8_t is_left, int8_t direction, uint16_t duty_percent)
     }
 }
 
-/* ---------- Сервоприводы ---------- */
+/* ---------- Servos ---------- */
 
-/* Растяжка ШИМ для полного диапазона угла: 500-2500 мкс. */
+/* PWM range stretched to cover the full angle range: 500-2500us. */
 #define SERVO_PULSE_0_US    500u
 #define SERVO_PULSE_180_US  2500u
 #define SERVO_RAW_MIN_US    500u
@@ -97,14 +97,14 @@ void Periph_ServoSetAngle(uint8_t servo_index, float angle_deg)
     servo_write_deg(k_servos[servo_index].htim, k_servos[servo_index].channel, (int)angle_deg);
 }
 
-/* Стартовые углы манипулятора (S1..S5), подобраны через arm_teleop.py. */
+/* Manipulator start angles (S1..S5), tuned via arm_teleop.py. */
 static const int k_servo_start_deg[SERVO_COUNT] = { -65, 30, 0, -90, 0 };
 
 void Periph_ServoStartAll(void)
 {
     for (size_t i = 0; i < SERVO_COUNT; i++) {
-        /* Сначала валидный импульс, потом PWM — иначе до первого
-         * servo_write_deg() Pulse=0, вне диапазона серво. */
+        /* Valid pulse first, then PWM — otherwise Pulse=0 before the first
+         * servo_write_deg(), out of the servo's range. */
         servo_write_deg(k_servos[i].htim, k_servos[i].channel, k_servo_start_deg[i]);
         HAL_TIM_PWM_Start(k_servos[i].htim, k_servos[i].channel);
     }

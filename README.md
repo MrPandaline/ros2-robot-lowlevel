@@ -38,16 +38,16 @@ ros2-robot.ioc                  CubeMX peripheral and clock configuration
 
 ## Building & flashing with STM32CubeIDE
 
-1. Clone this repo and open it in STM32CubeIDE (`File / Open Projects from File System`,
+1. Clone this repo and open it in STM32CubeIDE (`File -> Open Projects from File System`,
    point it at the repo root).
-2. `Drivers/`/`Middlewares/` are gitignored (vendor CubeMX/HAL/FreeRTOS code) and importing
+2. `Drivers/`-> `Middlewares/` are gitignored (vendor CubeMX/HAL/FreeRTOS code) and importing
    the project does **not** regenerate them by itself — open `ros2-robot.ioc` and click
    *Generate Code* (Device Configuration Tool) once, or the first build will fail with
    missing HAL headers.
 3. Make sure the micro-ROS static library is present at
    `micro_ros_stm32cubemx_utils/microros_static_library_ide/libmicroros/` (see below if
    it's missing or out of date).
-4. Build (`Project / Build`). This drives `Debug/makefile`, which CubeIDE regenerates —
+4. Build (`Project -> Build`). This drives `Debug/makefile`, which CubeIDE regenerates —
    the **symlinked** `Makefile` at the repo root points there, and is only meant to be
    invoked via CubeIDE's bundled ARM toolchain.
 5. Flash with an ST-Link via CubeIDE's Run configuration for this project.
@@ -105,21 +105,21 @@ paths, and copy them into `micro_ros_stm32cubemx_utils/microros_static_library_i
 
 **4. Wire the library into the CubeIDE project** :
 
-Right-click the project / *Properties* / *C/C++ Build* / *Settings*.
+Right-click the project -> *Properties* -> *C/C++ Build* -> *Settings*.
 
-*MCU GCC Linker* / *Libraries:*
+*MCU GCC Linker* -> *Libraries:*
 - **Library search path (-L)**: add
   `../micro_ros_stm32cubemx_utils/microros_static_library_ide/libmicroros`
 - **Libraries (-l)**: add `microros`
 
-*MCU GCC Compiler → Include paths:*
+*MCU GCC Compiler -> Include paths:*
 - add `../micro_ros_stm32cubemx_utils/microros_static_library_ide/libmicroros/microros_include`
 
 *Add the extra transport/support sources to the project:*
 
 Copy the files you need from `micro_ros_stm32cubemx_utils/extra_sources/` into
-`Core/Src/` (or add the folder as a source location via *Properties* / *C/C++ General* /
-*Paths and Symbols* / *Source Location* / *Add Folder*):
+`Core/Src/` (or add the folder as a source location via *Properties* -> *C/C++ General* ->
+*Paths and Symbols* -> *Source Location* -> *Add Folder*):
 - `custom_memory_manager.c`
 - `microros_allocators.c`
 - `microros_time.c`
