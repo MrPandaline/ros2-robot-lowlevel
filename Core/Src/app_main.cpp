@@ -5,6 +5,7 @@ extern "C" {
 #include "rclc/rclc.h"
 #include "rclc/executor.h"
 #include "rmw_microros/rmw_microros.h"
+#include "rmw_microros/time_sync.h"
 
 bool cubemx_transport_open(struct uxrCustomTransport * transport);
 bool cubemx_transport_close(struct uxrCustomTransport * transport);
@@ -21,15 +22,15 @@ size_t cubemx_transport_read(struct uxrCustomTransport* transport, uint8_t* buf,
 #include "peripherals.h"
 #include <string.h>
 
-/* MPU6050_ADDR, INA226_ADDR и т.п. — переиспользуем регистры/константы */
+/* MPU6050_ADDR, INA226_ADDR etc. — reusing the register/constant defines */
 
 extern UART_HandleTypeDef huart1;
-extern TIM_HandleTypeDef htim1;   /* PWM моторов */
-extern TIM_HandleTypeDef htim2;   /* энкодер правый */
-extern TIM_HandleTypeDef htim3;   /* энкодер левый */
+extern TIM_HandleTypeDef htim1;   /* motor PWM */
+extern TIM_HandleTypeDef htim2;   /* right encoder */
+extern TIM_HandleTypeDef htim3;   /* left encoder */
 extern I2C_HandleTypeDef hi2c1;
 
-/* ---------- micro-ROS сущности ---------- */
+/* ---------- micro-ROS entities ---------- */
 static rclc_support_t support;
 static rcl_node_t node;
 static rcl_allocator_t allocator;
@@ -51,22 +52,22 @@ static rcl_timer_t imu_timer;
 static rcl_timer_t joint_state_timer;
 static rcl_timer_t battery_timer;
 
-/* Буферы под имена джойнтов */
+/* Buffers for joint names */
 static rosidl_runtime_c__String joint_names[2];
 static char joint_name_left[]  = "left_wheel";
 static char joint_name_right[] = "right_wheel";
 static double joint_pos[2];
 static double joint_vel[2];
 
-/* Буфер под массив 5 углов серв */
+/* Buffer for the array of 5 servo angles */
 static float servo_data_buf[5];
 
-/* Буферы для frame_id */
+/* Buffers for frame_id */
 static char frame_id_imu[] = "imu_link";
 static char frame_id_base_link[] = "base_link";
 static char frame_id_battery[] = "battery";
 
-/* ---------- Счётчик ошибок публикации для детекта потери сессии ---------- */
+/* ---------- Publish error counter, used to detect a lost session ---------- */
 static volatile uint32_t g_publish_errors = 0;
 
 static void app_publisher_result(rcl_ret_t ret)
@@ -80,15 +81,27 @@ static void app_publisher_result(rcl_ret_t ret)
     }
 }
 
-/* ---------- Таймер: IMU ---------- */
+/* last_call_time_ns passed into rclc timer callbacks is elapsed time since
+ * the PREVIOUS call (jittery, ~timer period), not an absolute timestamp —
+ * using it for header.stamp made message timestamps non-monotonic. Real
+ * wall-clock time comes from rmw_uros_epoch_nanos() instead, valid once
+ * rmw_uros_sync_session() has synced with the agent's clock. */
+static void app_stamp_now(builtin_interfaces__msg__Time *stamp)
+{
+    int64_t now_ns = rmw_uros_epoch_nanos();
+    stamp->sec = (int32_t)(now_ns / 1000000000LL);
+    stamp->nanosec = (uint32_t)(now_ns % 1000000000LL);
+}
+
+/* ---------- Timer: IMU ---------- */
 static void imu_timer_callback(rcl_timer_t *timer, int64_t last_call_time_ns)
 {
     (void)timer;
+    (void)last_call_time_ns;
     if (timer == NULL) return;
 
-    /* Установка timestamp */
-    imu_msg.header.stamp.sec = last_call_time_ns / 1000000000ULL;
-    imu_msg.header.stamp.nanosec = last_call_time_ns % 1000000000ULL;
+    /* Set the timestamp */
+    app_stamp_now(&imu_msg.header.stamp);
 
     uint8_t buf[14];
     if (HAL_I2C_Mem_Read(&hi2c1, MPU6050_ADDR, MPU6050_REG_ACCEL_XOUT_H,
@@ -103,7 +116,7 @@ static void imu_timer_callback(rcl_timer_t *timer, int64_t last_call_time_ns)
     int16_t gy = (int16_t)(((uint16_t)buf[10] << 8) | buf[11]);
     int16_t gz = (int16_t)(((uint16_t)buf[12] << 8) | buf[13]);
 
-    /* g в м/с^2, dps в рад/с */
+    /* g to m/s^2, dps to rad/s */
     imu_msg.linear_acceleration.x = (ax / MPU6050_ACCEL_LSB_PER_G) * 9.80665;
     imu_msg.linear_acceleration.y = (ay / MPU6050_ACCEL_LSB_PER_G) * 9.80665;
     imu_msg.linear_acceleration.z = (az / MPU6050_ACCEL_LSB_PER_G) * 9.80665;
@@ -116,16 +129,15 @@ static void imu_timer_callback(rcl_timer_t *timer, int64_t last_call_time_ns)
     app_publisher_result(rcl_publish(&imu_pub, &imu_msg, NULL));
 }
 
-/* ---------- Таймер: энкодеры ---------- */
+/* ---------- Timer: encoders ---------- */
 static int32_t prev_right_cnt = 0, prev_left_cnt = 0;
 
 static void joint_state_timer_callback(rcl_timer_t *timer, int64_t last_call_time_ns)
 {
     (void)timer;
 
-    /* Установка timestamp */
-    joint_state_msg.header.stamp.sec = last_call_time_ns / 1000000000ULL;
-    joint_state_msg.header.stamp.nanosec = last_call_time_ns % 1000000000ULL;
+    /* Set the timestamp */
+    app_stamp_now(&joint_state_msg.header.stamp);
 
     int32_t right_cnt = (int32_t)__HAL_TIM_GET_COUNTER(&htim2);
     int32_t left_cnt  = (int32_t)__HAL_TIM_GET_COUNTER(&htim3);
@@ -135,6 +147,8 @@ static void joint_state_timer_callback(rcl_timer_t *timer, int64_t last_call_tim
     prev_right_cnt = right_cnt;
     prev_left_cnt  = left_cnt;
 
+    /* last_call_time_ns is the elapsed interval since the previous call —
+     * correct for a dt, unlike using it as an absolute timestamp above. */
     double dt_s = last_call_time_ns / 1e9;
     if (dt_s <= 0.0) dt_s = 0.05;
 
@@ -146,9 +160,9 @@ static void joint_state_timer_callback(rcl_timer_t *timer, int64_t last_call_tim
     app_publisher_result(rcl_publish(&joint_state_pub, &joint_state_msg, NULL));
 }
 
-/* ---------- Таймер: батарея ---------- */
+/* ---------- Timer: battery ---------- */
 
-/* RCL_MS_TO_NS(1000), ...) должно совпадать с этой константой. */
+/* RCL_MS_TO_NS(1000), ...) must match this constant. */
 #define BATTERY_PERIOD_S 1.0f
 
 static float g_consumed_wh = 0.0f;
@@ -156,10 +170,10 @@ static float g_consumed_wh = 0.0f;
 static void battery_timer_callback(rcl_timer_t *timer, int64_t last_call_time_ns)
 {
     (void)timer;
+    (void)last_call_time_ns;
 
-    /* Установка timestamp */
-    battery_msg.header.stamp.sec = last_call_time_ns / 1000000000ULL;
-    battery_msg.header.stamp.nanosec = last_call_time_ns % 1000000000ULL;
+    /* Set the timestamp */
+    app_stamp_now(&battery_msg.header.stamp);
 
     uint8_t buf[2];
 
@@ -194,8 +208,8 @@ static void battery_timer_callback(rcl_timer_t *timer, int64_t last_call_time_ns
             if (g_consumed_wh < 0.0f) {
                 g_consumed_wh = 0.0f;
             }
-            /* тут считаем приближённое значение расходованного заряда в А*ч используя мгновенное напряжение,
-             * в результате будет появляться постоянная систематическая ошибка                               */
+            /* Approximates consumed charge in Ah using the instantaneous voltage,
+             * which introduces a persistent systematic error. */
             if (battery_msg.voltage > 1.0) {
                 float consumed_ah = g_consumed_wh / (float)battery_msg.voltage;
                 double charge = battery_msg.design_capacity - consumed_ah;
@@ -215,14 +229,14 @@ static void battery_timer_callback(rcl_timer_t *timer, int64_t last_call_time_ns
 
 #include "motor_control_task.hpp"
 
-/* ---------- Подписка: /cmd_vel (моторы) ---------- */
+/* ---------- Subscription: /cmd_vel (motors) ---------- */
 static void cmd_vel_callback(const void *msgin)
 {
     const geometry_msgs__msg__Twist *tw = (const geometry_msgs__msg__Twist *)msgin;
     MotorController::instance().setTarget((float)tw->linear.x, (float)tw->angular.z);
 }
 
-/* ---------- Подписка: /servo_cmd (сервоприводы) ---------- */
+/* ---------- Subscription: /servo_cmd (servos) ---------- */
 static void servo_callback(const void *msgin)
 {
     const std_msgs__msg__Float32MultiArray *arr = (const std_msgs__msg__Float32MultiArray *)msgin;
@@ -270,7 +284,7 @@ static void app_low_level_sensors_init(void)
         100
     );
 
-    // Применяем аппаратное усреднение значений по 128 измерениям с помощью записи конфига в регистр конфига
+    // Enable hardware averaging over 128 samples by writing the config register
     uint8_t config_buf[2] = {
         (uint8_t)(INA226_CONFIG_VALUE >> 8),
         (uint8_t)(INA226_CONFIG_VALUE & 0xFF)
@@ -337,8 +351,8 @@ static void app_init_static_messages(void)
     joint_state_msg.effort.size = 0;
     joint_state_msg.effort.capacity = 0;
 
-    /* Сбрасываем предыдущие значения энкодеров, чтобы после reconnect
-     * не было огромного скачка joint_vel */
+    /* Reset the previous encoder values so a reconnect doesn't cause a huge
+     * jump in joint_vel */
     prev_right_cnt = (int32_t)__HAL_TIM_GET_COUNTER(&htim2);
     prev_left_cnt  = (int32_t)__HAL_TIM_GET_COUNTER(&htim3);
 
@@ -373,9 +387,9 @@ static void app_init_static_messages(void)
 
     battery_msg.voltage = 0.0;
     battery_msg.current = 0.0;
-    /* charge/percentage дальше пересчитываются каждый такт в
-     * battery_timer_callback из накопленной g_consumed_wh. Тут просто
-     * стартовое значение до первого реального отсчёта. */
+    /* charge/percentage are recomputed every tick in battery_timer_callback
+     * from the accumulated g_consumed_wh. This is just the starting value
+     * before the first real reading. */
     battery_msg.capacity = 2.0;
     battery_msg.design_capacity = 2.0;
     battery_msg.charge = battery_msg.design_capacity;
@@ -394,8 +408,8 @@ static void app_init_static_messages(void)
     servo_msg.data.size = 5;
     servo_msg.data.capacity = 5;
 
-    /* Буфер входящих значений servo_cmd (до первого сообщения) — не влияет
-     * на реальную стартовую позу сервоприводов, */
+    /* Buffer for incoming servo_cmd values (before the first message) —
+     * doesn't affect the actual servo start pose, */
     for (int i = 0; i < 5; i++) {
         servo_data_buf[i] = 0.0f;
     }
@@ -643,7 +657,7 @@ static bool app_micro_ros_spin_until_lost(void)
     for (;;) {
         rcl_ret_t rc = rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10));
 
-        /* RCL_RET_TIMEOUT ок, если нет новых событий */
+        /* RCL_RET_TIMEOUT is fine if there are no new events */
         if (rc != RCL_RET_OK && rc != RCL_RET_TIMEOUT) {
             return false;
         }
@@ -652,7 +666,7 @@ static bool app_micro_ros_spin_until_lost(void)
             return false;
         }
 
-        /* пингуем агента примерно раз в 200 мс */
+        /* ping the agent roughly every 200ms */
         if (++loop_counter >= 10u) {
             loop_counter = 0;
 
@@ -661,7 +675,7 @@ static bool app_micro_ros_spin_until_lost(void)
             } else {
                 ping_fail_counter++;
 
-                /* 2 неудачных пинга подряд считаем обрывом (~400-500 мс) */
+                /* 2 consecutive failed pings counts as a drop (~400-500ms) */
                 if (ping_fail_counter >= 2u) {
                     return false;
                 }
@@ -672,7 +686,7 @@ static bool app_micro_ros_spin_until_lost(void)
     }
 }
 
-/* ---------- Точка входа ---------- */
+/* ---------- Entry point ---------- */
 extern "C" void cpp_entry_point(void)
 {
     MotorControl_Init();
@@ -694,6 +708,11 @@ extern "C" void cpp_entry_point(void)
         app_wait_for_agent();
 
         if (app_micro_ros_init()) {
+            /* Sync epoch time with the agent so app_stamp_now() gives real
+             * wall-clock time, not just time-since-boot. Best-effort — if it
+             * fails, header.stamp will read as time since 1970 without the
+             * offset, but stays monotonic either way. */
+            (void)rmw_uros_sync_session(1000);
             app_micro_ros_spin_until_lost();
         }
 

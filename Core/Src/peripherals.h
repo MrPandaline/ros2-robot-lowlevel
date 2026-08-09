@@ -10,7 +10,7 @@ void Periph_MotorSet(uint8_t is_left, int8_t direction, uint16_t duty_percent);
 void Periph_ServoSetAngle(uint8_t servo_index, float angle_deg);
 void Periph_ServoStartAll(void);
 
-/* ---------- INA226 регистры и константы ---------- */
+/* ---------- INA226 registers and constants ---------- */
 #define INA226_ADDR          (0x40 << 1)
 #define INA226_REG_CONFIG    0x00
 #define INA226_REG_SHUNTV    0x01
@@ -33,8 +33,8 @@ void Periph_ServoStartAll(void);
 #define MPU6050_REG_ACCEL_XOUT_H 0x3B
 #define MPU6050_REG_GYRO_XOUT_H  0x43
 
-#define MPU6050_ACCEL_LSB_PER_G   16384.0f  /* при чувствительности +-2g (по умолчанию) */
-#define MPU6050_GYRO_LSB_PER_DPS   131.0f   /* при чувствительности +-250 dps (по умолчанию) */
+#define MPU6050_ACCEL_LSB_PER_G   16384.0f  /* at default sensitivity +-2g */
+#define MPU6050_GYRO_LSB_PER_DPS   131.0f   /* at default sensitivity +-250 dps */
 
 #ifdef __cplusplus
 }
