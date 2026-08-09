@@ -1,0 +1,59 @@
+# --- STM32CubeIDE build artifacts ---
+Debug/
+debug/
+Release/
+release/
+.metadata/
+.settings/
+
+# --- spec ---
+*.launch
+*.cfg
+
+# --- Object/linker/binary build artifacts ---
+*.d
+*.o
+*.ko
+*.obj
+*.elf
+*.ilk
+*.map
+*.exp
+*.lib
+*.a
+*.la
+*.lo
+*.dll
+*.so
+*.so.*
+*.dylib
+*.exe
+*.out
+*.app
+*.i*86
+*.x86_64
+*.hex
+*.bin
+*.dSYM/
+*.su
+*.idb
+*.pdb
+
+# --- CubeMX/CubeIDE vendor code ---
+/Drivers/
+/Middlewares/
+
+# --- micro-ROS vendor ---
+/micro_ros_stm32cubemx_utils/*
+!/micro_ros_stm32cubemx_utils/extra_sources/
+/micro_ros_stm32cubemx_utils/extra_sources/*
+!/micro_ros_stm32cubemx_utils/extra_sources/microros_transports/
+/micro_ros_stm32cubemx_utils/extra_sources/microros_transports/*
+!/micro_ros_stm32cubemx_utils/extra_sources/microros_transports/dma_transport.c
+
+
+# --- OS / IDE мусор ---
+.DS_Store
+*~
+.vscode/
+
