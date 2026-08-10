@@ -20,7 +20,8 @@ struct CmdVelTarget {
     TickType_t timestamp;
 };
 
-constexpr float kTrackWidthM = 0.1825f;
+// kTrackWidthM needs calibration for different robots
+constexpr float kTrackWidthM = 0.161f;
 constexpr float kMaxLinearMps = 0.5f;
 constexpr uint32_t kCmdVelTimeoutMs = 500;
 constexpr uint32_t kControlPeriodMs = 20;  // 50 Hz

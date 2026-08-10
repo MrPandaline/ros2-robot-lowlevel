@@ -52,6 +52,12 @@ static rcl_timer_t imu_timer;
 static rcl_timer_t joint_state_timer;
 static rcl_timer_t battery_timer;
 
+/* Gyro zero-rate offset, in raw LSB,measured once at boot
+ * in app_calibrate_gyro() and subtracted in imu_timer_callback(). */
+static float g_gyro_bias_x = 0.0f;
+static float g_gyro_bias_y = 0.0f;
+static float g_gyro_bias_z = 0.0f;
+
 /* Buffers for joint names */
 static rosidl_runtime_c__String joint_names[2];
 static char joint_name_left[]  = "left_wheel";
@@ -112,9 +118,9 @@ static void imu_timer_callback(rcl_timer_t *timer, int64_t last_call_time_ns)
     int16_t ax = (int16_t)(((uint16_t)buf[0] << 8) | buf[1]);
     int16_t ay = (int16_t)(((uint16_t)buf[2] << 8) | buf[3]);
     int16_t az = (int16_t)(((uint16_t)buf[4] << 8) | buf[5]);
-    int16_t gx = (int16_t)(((uint16_t)buf[8] << 8) | buf[9]);
-    int16_t gy = (int16_t)(((uint16_t)buf[10] << 8) | buf[11]);
-    int16_t gz = (int16_t)(((uint16_t)buf[12] << 8) | buf[13]);
+    float gx = (float)(int16_t)(((uint16_t)buf[8] << 8) | buf[9]) - g_gyro_bias_x;
+    float gy = (float)(int16_t)(((uint16_t)buf[10] << 8) | buf[11]) - g_gyro_bias_y;
+    float gz = (float)(int16_t)(((uint16_t)buf[12] << 8) | buf[13]) - g_gyro_bias_z;
 
     /* g to m/s^2, dps to rad/s */
     imu_msg.linear_acceleration.x = (ax / MPU6050_ACCEL_LSB_PER_G) * 9.80665;
@@ -270,6 +276,37 @@ enum AppInitFlags {
 
 static uint32_t g_init_flags = 0;
 
+#define GYRO_CAL_SAMPLES 200
+
+/* Robot must be stationary for the ~1s this takes (200 samples * 5ms) —
+ * called once at boot, right after MPU6050 wake-up. */
+static void app_calibrate_gyro(void)
+{
+    //Settle time
+	osDelay(50);
+
+    int32_t sum_x = 0, sum_y = 0, sum_z = 0;
+    uint32_t good_samples = 0;
+
+    for (int i = 0; i < GYRO_CAL_SAMPLES; i++) {
+        uint8_t buf[6];
+        if (HAL_I2C_Mem_Read(&hi2c1, MPU6050_ADDR, MPU6050_REG_GYRO_XOUT_H,
+                              I2C_MEMADD_SIZE_8BIT, buf, 6, 20) == HAL_OK) {
+            sum_x += (int16_t)(((uint16_t)buf[0] << 8) | buf[1]);
+            sum_y += (int16_t)(((uint16_t)buf[2] << 8) | buf[3]);
+            sum_z += (int16_t)(((uint16_t)buf[4] << 8) | buf[5]);
+            good_samples++;
+        }
+        osDelay(5);
+    }
+
+    if (good_samples > 0) {
+        g_gyro_bias_x = (float)sum_x / (float)good_samples;
+        g_gyro_bias_y = (float)sum_y / (float)good_samples;
+        g_gyro_bias_z = (float)sum_z / (float)good_samples;
+    }
+}
+
 static void app_low_level_sensors_init(void)
 {
     /* MPU6050 wake-up */
@@ -283,6 +320,8 @@ static void app_low_level_sensors_init(void)
         1,
         100
     );
+
+    app_calibrate_gyro();
 
     // Enable hardware averaging over 128 samples by writing the config register
     uint8_t config_buf[2] = {
