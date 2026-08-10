@@ -98,7 +98,7 @@ void Periph_ServoSetAngle(uint8_t servo_index, float angle_deg)
 }
 
 /* Manipulator start angles (S1..S5), tuned via arm_teleop.py. */
-static const int k_servo_start_deg[SERVO_COUNT] = { -65, 30, 0, -90, 0 };
+static const int k_servo_start_deg[SERVO_COUNT] = { -90, 30, 0, -90, 0 };
 
 void Periph_ServoStartAll(void)
 {
