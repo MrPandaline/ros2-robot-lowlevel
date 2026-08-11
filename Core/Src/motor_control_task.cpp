@@ -12,6 +12,12 @@ extern "C" {
 #include <cmath>
 #include <cstdint>
 
+/* TIM2 = right encoder (32-bit counter), TIM3 = left encoder (16-bit
+ * counter) — same mapping as Core/Src/app_main.cpp's joint_state
+ * publisher. */
+extern TIM_HandleTypeDef htim2;
+extern TIM_HandleTypeDef htim3;
+
 namespace {
 
 struct CmdVelTarget {
@@ -22,41 +28,124 @@ struct CmdVelTarget {
 
 // kTrackWidthM needs calibration for different robots
 constexpr float kTrackWidthM = 0.161f;
-constexpr float kMaxLinearMps = 0.5f;
 constexpr uint32_t kCmdVelTimeoutMs = 500;
 constexpr uint32_t kControlPeriodMs = 20;  // 50 Hz
+constexpr float kControlPeriodS = kControlPeriodMs / 1000.0f;
 
-int8_t speedToDir(float speed_mps)
+/* wheel_diameter_m/ticks_per_rev must be
+ * kept in sync wheel_odometry.py*/
+constexpr float kWheelDiameterM = 0.065f;
+constexpr float kTicksPerRev = 32.0f;
+constexpr float kWheelCircumferenceM = kWheelDiameterM * 3.14159265f;
+
+/* PID gains — starting point, needs empirical tuning on the real robot */
+constexpr float kPidKp = 55.0f;
+constexpr float kPidKi = 12.0f;
+constexpr float kPidKd = 0.0f;
+
+constexpr float kPidOutputMax = 100.0f;
+constexpr float kIntegralMax = kPidKi > 1e-6f ? (kPidOutputMax / kPidKi) : 0.0f;
+
+struct PidState {
+    float integral = 0.0f;
+    float prev_error = 0.0f;
+};
+
+/* Linear approximation of duty to motor radial speed relationship —
+ * needs empirical tuning for different drives */
+constexpr float kFeedforwardOffsetPercent = 3.75f;
+constexpr float kFeedforwardSlopePercentPerMps = 195.2f;
+
+float feedforwardDuty(float target_mps)
 {
-    if (!std::isfinite(speed_mps)) {
+    if (std::fabs(target_mps) < 1e-4f) {
+        return 0.0f;
+    }
+
+    const float magnitude =
+        kFeedforwardOffsetPercent + kFeedforwardSlopePercentPerMps * std::fabs(target_mps);
+
+    return (target_mps > 0.0f) ? magnitude : -magnitude;
+}
+
+float pidStep(PidState &state, float target_mps, float measured_mps, float dt_s)
+{
+    const float error = target_mps - measured_mps;
+
+    state.integral += error * dt_s;
+    if (state.integral > kIntegralMax) {
+        state.integral = kIntegralMax;
+    } else if (state.integral < -kIntegralMax) {
+        state.integral = -kIntegralMax;
+    }
+
+    const float derivative = (dt_s > 0.0f) ? (error - state.prev_error) / dt_s : 0.0f;
+    state.prev_error = error;
+
+    float output = feedforwardDuty(target_mps) +
+                    kPidKp * error + kPidKi * state.integral + kPidKd * derivative;
+
+    if (output > kPidOutputMax) {
+        output = kPidOutputMax;
+    } else if (output < -kPidOutputMax) {
+        output = -kPidOutputMax;
+    }
+
+    return output;
+}
+
+int8_t speedToDir(float signed_duty)
+{
+    if (!std::isfinite(signed_duty)) {
         return 0;
     }
 
-    if (speed_mps > 0.001f) {
+    if (signed_duty > 0.5f) {
         return 1;
     }
 
-    if (speed_mps < -0.001f) {
+    if (signed_duty < -0.5f) {
         return -1;
     }
 
     return 0;
 }
 
-uint16_t speedToDuty(float speed_mps)
+uint16_t signedDutyToMagnitude(float signed_duty)
 {
-    if (!std::isfinite(speed_mps)) {
+    if (!std::isfinite(signed_duty)) {
         return 0;
     }
 
-    float duty = std::fabs(speed_mps) / kMaxLinearMps * 100.0f;
-
+    float duty = std::fabs(signed_duty);
     if (duty > 100.0f) {
         duty = 100.0f;
     }
 
     return static_cast<uint16_t>(duty);
 }
+
+/* current - previous with correct wraparound for TIM3's 16-bit counter
+ * (mirrors wrapped_delta() in orange-pi-bringup/scripts/wheel_odometry.py —
+ * must stay consistent with it). */
+int32_t wrappedDelta16(uint16_t current, uint16_t previous)
+{
+    int32_t delta = (int32_t)current - (int32_t)previous;
+    if (delta > 32768) {
+        delta -= 65536;
+    } else if (delta < -32768) {
+        delta += 65536;
+    }
+    return delta;
+}
+/* output speed smoothing sliding window length*/
+constexpr int kSpeedFilterPeriods = 3;
+
+struct EncoderHistory {
+    uint16_t left_raw[kSpeedFilterPeriods] = {};
+    uint32_t right_raw[kSpeedFilterPeriods] = {};
+    int next_slot = 0;
+};
 
 }
 
@@ -105,6 +194,19 @@ void MotorController::run()
     const TickType_t period_ticks_raw = pdMS_TO_TICKS(kControlPeriodMs);
     const TickType_t period_ticks = (period_ticks_raw == 0) ? 1 : period_ticks_raw;
 
+    PidState left_pid;
+    PidState right_pid;
+
+    EncoderHistory history;
+    const uint16_t initial_left_raw = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
+    const uint32_t initial_right_raw = __HAL_TIM_GET_COUNTER(&htim2);
+    for (int i = 0; i < kSpeedFilterPeriods; i++) {
+        history.left_raw[i] = initial_left_raw;
+        history.right_raw[i] = initial_right_raw;
+    }
+
+    constexpr float kFilterWindowS = kControlPeriodS * kSpeedFilterPeriods;
+
     for (;;) {
         if (xQueueReceive(q, &incoming, 0) == pdTRUE) {
             target = incoming;
@@ -122,11 +224,39 @@ void MotorController::run()
         const float right_speed =
             target.linear + target.angular * kTrackWidthM * 0.5f;
 
-        const int8_t left_dir = speedToDir(left_speed);
-        const int8_t right_dir = speedToDir(right_speed);
+        const uint16_t left_raw = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
+        const uint32_t right_raw = __HAL_TIM_GET_COUNTER(&htim2);
 
-        const uint16_t left_duty = speedToDuty(left_speed);
-        const uint16_t right_duty = speedToDuty(right_speed);
+        /* Compare against the reading from kSpeedFilterPeriods periods ago
+         * (about to be overwritten below), not the immediately previous
+         * one — that's the averaging window. */
+        const uint16_t left_raw_oldest = history.left_raw[history.next_slot];
+        const uint32_t right_raw_oldest = history.right_raw[history.next_slot];
+
+        const int32_t d_left_ticks = wrappedDelta16(left_raw, left_raw_oldest);
+        /* TIM2's count direction is physically inverted relative to the
+         * motor's "forward" direction (confirmed by hand-spinning the
+         * wheel) — negate so increasing effectively means forward, same
+         * convention as the joint_states publisher in app_main.cpp. */
+        const int32_t d_right_ticks = -(int32_t)(right_raw - right_raw_oldest);
+
+        history.left_raw[history.next_slot] = left_raw;
+        history.right_raw[history.next_slot] = right_raw;
+        history.next_slot = (history.next_slot + 1) % kSpeedFilterPeriods;
+
+        const float left_measured_mps =
+            (float)d_left_ticks / kTicksPerRev * kWheelCircumferenceM / kFilterWindowS;
+        const float right_measured_mps =
+            (float)d_right_ticks / kTicksPerRev * kWheelCircumferenceM / kFilterWindowS;
+
+        const float left_output = pidStep(left_pid, left_speed, left_measured_mps, kControlPeriodS);
+        const float right_output = pidStep(right_pid, right_speed, right_measured_mps, kControlPeriodS);
+
+        const int8_t left_dir = speedToDir(left_output);
+        const int8_t right_dir = speedToDir(right_output);
+
+        const uint16_t left_duty = signedDutyToMagnitude(left_output);
+        const uint16_t right_duty = signedDutyToMagnitude(right_output);
 
         Periph_MotorSet(0, left_dir, left_duty);
         Periph_MotorSet(1, right_dir, right_duty);

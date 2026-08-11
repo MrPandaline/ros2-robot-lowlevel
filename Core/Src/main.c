@@ -65,7 +65,7 @@ osThreadId_t motorTaskHandle;
 const osThreadAttr_t motorTask_attributes = {
   .name = "motorTask",
   .stack_size = 1024 * 4,
-  .priority = (osPriority_t) osPriorityBelowNormal1,
+  .priority = (osPriority_t) osPriorityAboveNormal1,
 };
 /* USER CODE BEGIN PV */
 volatile uint32_t g_reset_flags = 0;
