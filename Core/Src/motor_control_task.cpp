@@ -12,11 +12,11 @@ extern "C" {
 #include <cmath>
 #include <cstdint>
 
-/* TIM2 = right encoder (32-bit counter), TIM3 = left encoder (16-bit
+/* TIM2 = right encoder (32-bit counter), TIM5 = left encoder (32-bit
  * counter) — same mapping as Core/Src/app_main.cpp's joint_state
  * publisher. */
 extern TIM_HandleTypeDef htim2;
-extern TIM_HandleTypeDef htim3;
+extern TIM_HandleTypeDef htim5;
 
 namespace {
 
@@ -27,8 +27,8 @@ struct CmdVelTarget {
 };
 
 // kTrackWidthM needs calibration for different robots
-constexpr float kTrackWidthM = 0.161f;
-constexpr uint32_t kCmdVelTimeoutMs = 500;
+constexpr float kTrackWidthM = 0.1967f;
+constexpr uint32_t kCmdVelTimeoutMs = 350;
 constexpr uint32_t kControlPeriodMs = 20;  // 50 Hz
 constexpr float kControlPeriodS = kControlPeriodMs / 1000.0f;
 
@@ -39,8 +39,8 @@ constexpr float kTicksPerRev = 32.0f;
 constexpr float kWheelCircumferenceM = kWheelDiameterM * 3.14159265f;
 
 /* PID gains — starting point, needs empirical tuning on the real robot */
-constexpr float kPidKp = 55.0f;
-constexpr float kPidKi = 12.0f;
+constexpr float kPidKp = 30.0f;
+constexpr float kPidKi = 103.0f;
 constexpr float kPidKd = 0.0f;
 
 constexpr float kPidOutputMax = 100.0f;
@@ -125,24 +125,11 @@ uint16_t signedDutyToMagnitude(float signed_duty)
     return static_cast<uint16_t>(duty);
 }
 
-/* current - previous with correct wraparound for TIM3's 16-bit counter
- * (mirrors wrapped_delta() in orange-pi-bringup/scripts/wheel_odometry.py —
- * must stay consistent with it). */
-int32_t wrappedDelta16(uint16_t current, uint16_t previous)
-{
-    int32_t delta = (int32_t)current - (int32_t)previous;
-    if (delta > 32768) {
-        delta -= 65536;
-    } else if (delta < -32768) {
-        delta += 65536;
-    }
-    return delta;
-}
 /* output speed smoothing sliding window length*/
 constexpr int kSpeedFilterPeriods = 3;
 
 struct EncoderHistory {
-    uint16_t left_raw[kSpeedFilterPeriods] = {};
+    uint32_t left_raw[kSpeedFilterPeriods] = {};
     uint32_t right_raw[kSpeedFilterPeriods] = {};
     int next_slot = 0;
 };
@@ -198,7 +185,7 @@ void MotorController::run()
     PidState right_pid;
 
     EncoderHistory history;
-    const uint16_t initial_left_raw = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
+    const uint32_t initial_left_raw = __HAL_TIM_GET_COUNTER(&htim5);
     const uint32_t initial_right_raw = __HAL_TIM_GET_COUNTER(&htim2);
     for (int i = 0; i < kSpeedFilterPeriods; i++) {
         history.left_raw[i] = initial_left_raw;
@@ -224,21 +211,17 @@ void MotorController::run()
         const float right_speed =
             target.linear + target.angular * kTrackWidthM * 0.5f;
 
-        const uint16_t left_raw = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
+        const uint32_t left_raw = __HAL_TIM_GET_COUNTER(&htim5);
         const uint32_t right_raw = __HAL_TIM_GET_COUNTER(&htim2);
 
-        /* Compare against the reading from kSpeedFilterPeriods periods ago
-         * (about to be overwritten below), not the immediately previous
-         * one — that's the averaging window. */
-        const uint16_t left_raw_oldest = history.left_raw[history.next_slot];
+        /* Compare against the reading from kSpeedFilterPeriods periods ago */
+        const uint32_t left_raw_oldest = history.left_raw[history.next_slot];
         const uint32_t right_raw_oldest = history.right_raw[history.next_slot];
 
-        const int32_t d_left_ticks = wrappedDelta16(left_raw, left_raw_oldest);
-        /* TIM2's count direction is physically inverted relative to the
-         * motor's "forward" direction (confirmed by hand-spinning the
-         * wheel) — negate so increasing effectively means forward, same
-         * convention as the joint_states publisher in app_main.cpp. */
-        const int32_t d_right_ticks = -(int32_t)(right_raw - right_raw_oldest);
+        const int32_t d_left_ticks = (int32_t)(left_raw - left_raw_oldest);
+        /* TIM2's count direction matches the motor's "forward" direction as
+         * currently wired */
+        const int32_t d_right_ticks = (int32_t)(right_raw - right_raw_oldest);
 
         history.left_raw[history.next_slot] = left_raw;
         history.right_raw[history.next_slot] = right_raw;

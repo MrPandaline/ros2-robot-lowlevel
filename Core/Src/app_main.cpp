@@ -27,7 +27,7 @@ size_t cubemx_transport_read(struct uxrCustomTransport* transport, uint8_t* buf,
 extern UART_HandleTypeDef huart1;
 extern TIM_HandleTypeDef htim1;   /* motor PWM */
 extern TIM_HandleTypeDef htim2;   /* right encoder */
-extern TIM_HandleTypeDef htim3;   /* left encoder */
+extern TIM_HandleTypeDef htim5;   /* left encoder */
 extern I2C_HandleTypeDef hi2c1;
 
 /* ---------- micro-ROS entities ---------- */
@@ -87,11 +87,6 @@ static void app_publisher_result(rcl_ret_t ret)
     }
 }
 
-/* last_call_time_ns passed into rclc timer callbacks is elapsed time since
- * the PREVIOUS call (jittery, ~timer period), not an absolute timestamp —
- * using it for header.stamp made message timestamps non-monotonic. Real
- * wall-clock time comes from rmw_uros_epoch_nanos() instead, valid once
- * rmw_uros_sync_session() has synced with the agent's clock. */
 static void app_stamp_now(builtin_interfaces__msg__Time *stamp)
 {
     int64_t now_ns = rmw_uros_epoch_nanos();
@@ -138,23 +133,6 @@ static void imu_timer_callback(rcl_timer_t *timer, int64_t last_call_time_ns)
 /* ---------- Timer: encoders ---------- */
 static int32_t prev_right_cnt = 0, prev_left_cnt = 0;
 
-/* TIM3's counter is configured 16-bit (0..65535) — a naive current-previous
- * subtraction blows up to a ~65000-tick spurious delta whenever the count
- * wraps around 0/65535 (happens routinely during normal driving, not just
- * at extremes). Mirrors wrappedDelta16() in motor_control_task.cpp and
- * wrapped_delta() in orange-pi-bringup/scripts/wheel_odometry.py — must
- * stay consistent with both. */
-static int32_t wrapped_delta16(int32_t current, int32_t previous)
-{
-    int32_t delta = current - previous;
-    if (delta > 32768) {
-        delta -= 65536;
-    } else if (delta < -32768) {
-        delta += 65536;
-    }
-    return delta;
-}
-
 static void joint_state_timer_callback(rcl_timer_t *timer, int64_t last_call_time_ns)
 {
     (void)timer;
@@ -162,17 +140,15 @@ static void joint_state_timer_callback(rcl_timer_t *timer, int64_t last_call_tim
     /* Set the timestamp */
     app_stamp_now(&joint_state_msg.header.stamp);
 
-    /* TIM2's count direction is physically inverted relative to the motor's
-     * "forward" direction (confirmed by hand-spinning the wheel) — negate
-     * here so increasing right_cnt consistently means forward, matching
-     * left_cnt and matching the sign motor_control_task.cpp's PID expects. */
-    int32_t right_cnt = -(int32_t)__HAL_TIM_GET_COUNTER(&htim2);
-    int32_t left_cnt  = (int32_t)__HAL_TIM_GET_COUNTER(&htim3);
+    /* TIM2's count direction matches the motor's "forward" direction as
+     * currently wired */
+    int32_t right_cnt = (int32_t)__HAL_TIM_GET_COUNTER(&htim2);
+    int32_t left_cnt  = (int32_t)__HAL_TIM_GET_COUNTER(&htim5);
 
     int32_t d_right = right_cnt - prev_right_cnt;
-    int32_t d_left  = wrapped_delta16(left_cnt, prev_left_cnt);
-    prev_right_cnt = right_cnt;
-    prev_left_cnt  = left_cnt;
+    int32_t d_left  = left_cnt - prev_left_cnt;
+    prev_right_cnt  = right_cnt;
+    prev_left_cnt   = left_cnt;
 
     /* last_call_time_ns is the elapsed interval since the previous call —
      * correct for a dt, unlike using it as an absolute timestamp above. */
@@ -413,8 +389,8 @@ static void app_init_static_messages(void)
 
     /* Reset the previous encoder values so a reconnect doesn't cause a huge
      * jump in joint_vel */
-    prev_right_cnt = -(int32_t)__HAL_TIM_GET_COUNTER(&htim2);
-    prev_left_cnt  = (int32_t)__HAL_TIM_GET_COUNTER(&htim3);
+    prev_right_cnt = (int32_t)__HAL_TIM_GET_COUNTER(&htim2);
+    prev_left_cnt  = (int32_t)__HAL_TIM_GET_COUNTER(&htim5);
 
     /* ---- IMU ---- */
     imu_msg.header.frame_id.data = frame_id_imu;
@@ -571,7 +547,7 @@ static bool app_micro_ros_init(void)
     rc = rclc_timer_init_default(
         &joint_state_timer,
         &support,
-        RCL_MS_TO_NS(40),
+        RCL_MS_TO_NS(100),
         joint_state_timer_callback
     );
     if (rc != RCL_RET_OK) {

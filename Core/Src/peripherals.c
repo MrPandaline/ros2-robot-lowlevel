@@ -1,18 +1,9 @@
-/*
- * peripherals.c
- *
- * Pins and timers match the STM32F411CEUx pinout:
- *   LEFT_AIN_1  = PC13   LEFT_AIN_2  = PC14
- *   RIGHT_AIN1  = PC15   RIGHT_AIN2  = PA3
- *   STBY        = PA4
- *   TIM1_CH1_PWM_LEFT  = PA8   TIM1_CH2_PWM_RIGHT = PA9
- */
-
 #include "peripherals.h"
 
 extern TIM_HandleTypeDef htim1;   /* motor PWM */
 extern TIM_HandleTypeDef htim4;   /* servos */
-extern TIM_HandleTypeDef htim5;   /* servos */
+extern TIM_HandleTypeDef htim3;   /* servos */
+extern TIM_HandleTypeDef htim9;   /* servos */
 
 /* ---------- TB6612FNG driver control ---------- */
 static void motor_stby(uint8_t enable)
@@ -67,11 +58,11 @@ typedef struct {
 } servo_ch_t;
 
 static const servo_ch_t k_servos[] = {
-    { &htim4, TIM_CHANNEL_1 },
     { &htim4, TIM_CHANNEL_2 },
-    { &htim5, TIM_CHANNEL_1 },
-    { &htim5, TIM_CHANNEL_2 },
-    { &htim5, TIM_CHANNEL_3 },
+    { &htim4, TIM_CHANNEL_1 },
+    { &htim3, TIM_CHANNEL_2 },
+    { &htim3, TIM_CHANNEL_1 },
+    { &htim9, TIM_CHANNEL_1 },
 };
 #define SERVO_COUNT (sizeof(k_servos) / sizeof(k_servos[0]))
 
@@ -98,7 +89,7 @@ void Periph_ServoSetAngle(uint8_t servo_index, float angle_deg)
 }
 
 /* Manipulator start angles (S1..S5), tuned via arm_teleop.py. */
-static const int k_servo_start_deg[SERVO_COUNT] = { -20, 30, 0, -90, 0 };
+static const int k_servo_start_deg[SERVO_COUNT] = { 70, -70, 20, -10, 0 };
 
 void Periph_ServoStartAll(void)
 {
